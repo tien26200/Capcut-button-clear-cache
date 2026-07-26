@@ -1,0 +1,33 @@
+name: Build Executable
+
+on:
+  push:
+    branches: [ "main", "master" ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.10'
+
+    - name: Install PyInstaller
+      run: |
+        python -m pip install --upgrade pip
+        pip install pyinstaller
+
+    - name: Build Exe
+      run: |
+        pyinstaller --onefile --noconsole --name="CapCut_Cleaner" cleaner.py
+
+    - name: Upload Artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: CapCut_Cleaner_EXE
+        path: dist/CapCut_Cleaner.exe
