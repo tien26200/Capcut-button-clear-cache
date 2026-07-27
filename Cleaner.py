@@ -1,57 +1,76 @@
-
 import os
 import json
 import ctypes
 import shutil
 import stat
 import threading
+import subprocess
 import tkinter as tk
-from tkinter import filedialog, messagebox
+from tkinter import filedialog, messagebox, ttk
 
-# Cấu hình DPI cho màn hình hiển thị sắc nét
+# Cấu hình DPI sắc nét trên Windows
 try:
     ctypes.windll.shcore.SetProcessDpiAwareness(1)
 except Exception:
     pass
 
+# Khởi tạo Pygame Mixer để nghe thử âm thanh SFX
+try:
+    import pygame
+    pygame.mixer.init()
+    HAS_PYGAME = True
+except Exception:
+    HAS_PYGAME = False
+
 CONFIG_FILE = "config.json"
 USERNAME = os.getlogin()
 
+# Bổ trợ Kéo Thả Chuẩn Native Windows (CF_HDROP)
+def set_clipboard_files(files):
+    from ctypes import windll, c_char
+    import struct
+
+    GMEM_ZEROINIT = 0x0040
+    GMEM_MOVEABLE = 0x0002
+    CF_HDROP = 15
+
+    offset = 20
+    data = bytearray(struct.pack('IiiII', offset, 0, 0, 0, 1))
+    for file in files:
+        data.extend(file.encode('utf-16le'))
+        data.extend(b'\x00\x00')
+    data.extend(b'\x00\x00')
+
+    windll.user32.OpenClipboard(0)
+    windll.user32.EmptyClipboard()
+    
+    h_global = windll.kernel32.GlobalAlloc(GMEM_MOVEABLE | GMEM_ZEROINIT, len(data))
+    p_global = windll.kernel32.GlobalLock(h_global)
+    
+    cdll_msvcrt = ctypes.CDLL('msvcrt')
+    cdll_msvcrt.memcpy(p_global, (c_char * len(data)).from_buffer(data), len(data))
+    
+    windll.kernel32.GlobalUnlock(h_global)
+    windll.user32.SetClipboardData(CF_HDROP, h_global)
+    windll.user32.CloseClipboard()
+
 CACHE_CATEGORIES = {
-    "preview": {
-        "name": "Cache Xem trước (Preview/Drafts)",
-        "paths": [
-            rf"C:\Users\{USERNAME}\AppData\Local\CapCut\User Data\Cache",
-            rf"C:\Users\{USERNAME}\AppData\Local\CapCut\User Data\Drafts"
-        ]
-    },
-    "proxy": {
-        "name": "File Proxy tạm",
-        "paths": [
-            rf"C:\Users\{USERNAME}\AppData\Local\CapCut\User Data\Proxy"
-        ]
-    },
-    "gpu": {
-        "name": "GPU & Shader Cache",
-        "paths": [
-            rf"C:\Users\{USERNAME}\AppData\Local\CapCut\User Data\GPUCache"
-        ]
-    },
-    "temp": {
-        "name": "File rác Temp hệ thống",
-        "paths": [
-            rf"C:\Users\{USERNAME}\AppData\Local\CapCut\Apps\temp",
-            rf"C:\Users\{USERNAME}\AppData\Local\Temp\CapCut"
-        ]
-    }
+    "preview": {"name": "Cache Xem trước (Preview/Drafts)", "paths": [rf"C:\Users\{USERNAME}\AppData\Local\CapCut\User Data\Cache", rf"C:\Users\{USERNAME}\AppData\Local\CapCut\User Data\Drafts"]},
+    "proxy": {"name": "File Proxy tạm", "paths": [rf"C:\Users\{USERNAME}\AppData\Local\CapCut\User Data\Proxy"]},
+    "gpu": {"name": "GPU & Shader Cache", "paths": [rf"C:\Users\{USERNAME}\AppData\Local\CapCut\User Data\GPUCache"]},
+    "temp": {"name": "File rác Temp hệ thống", "paths": [rf"C:\Users\{USERNAME}\AppData\Local\CapCut\Apps\temp", rf"C:\Users\{USERNAME}\AppData\Local\Temp\CapCut"]}
 }
 
 def load_cfg():
     default_cfg = {
-        "x": 200, "y": 200, "w": 340, "h": 90,
+        "x": 200, "y": 200, "w": 420, "h": 90,
         "clean_mode": "all",
         "selected_types": ["preview", "proxy", "gpu", "temp"],
-        "sfx_list": []
+        "custom_folders": [],
+        "sfx_data": {"Tất cả": []},
+        "clip_data": {"Tất cả": []},
+        "prompt_data": {"Chung": []},
+        "hotkey": "<Control-Alt-c>"
     }
     if os.path.exists(CONFIG_FILE):
         try:
@@ -84,27 +103,23 @@ class CustomConfirm(tk.Toplevel):
         self.attributes("-topmost", True)
         self.configure(bg="#1e1f29")
         
-        pw = parent.winfo_width()
-        ph = parent.winfo_height()
-        px = parent.winfo_x()
-        py = parent.winfo_y()
-        self.geometry(f"260x110+{px + (pw-260)//2}+{py + (ph-110)//2}")
+        pw, ph = parent.winfo_width(), parent.winfo_height()
+        px, py = parent.winfo_x(), parent.winfo_y()
+        self.geometry(f"280x120+{px + (pw-280)//2}+{py + (ph-120)//2}")
         
         f_border = tk.Frame(self, bg="#3b3e54", bd=1)
         f_border.pack(fill="both", expand=True)
 
-        lbl = tk.Label(f_border, text=msg, bg="#1e1f29", fg="#ffffff", font=("Segoe UI", 9, "bold"))
+        lbl = tk.Label(f_border, text=msg, bg="#1e1f29", fg="#ffffff", font=("Segoe UI", 9, "bold"), wraplength=260)
         lbl.pack(pady=(18, 12))
 
         btn_box = tk.Frame(f_border, bg="#1e1f29")
         btn_box.pack()
 
-        btn_no = tk.Button(btn_box, text="Hủy", bg="#2b2d42", fg="white", bd=0, width=8, 
-                          command=self.destroy, font=("Segoe UI", 9))
+        btn_no = tk.Button(btn_box, text="Hủy", bg="#2b2d42", fg="white", bd=0, width=8, command=self.destroy, font=("Segoe UI", 9))
         btn_no.pack(side="left", padx=6)
 
-        btn_yes = tk.Button(btn_box, text="Xóa ngay", bg="#ff4d4f", fg="white", bd=0, width=8, 
-                           command=self.on_yes, font=("Segoe UI", 9, "bold"))
+        btn_yes = tk.Button(btn_box, text="Đồng ý", bg="#ff4d4f", fg="white", bd=0, width=8, command=self.on_yes, font=("Segoe UI", 9, "bold"))
         btn_yes.pack(side="left", padx=6)
 
     def on_yes(self):
@@ -117,10 +132,11 @@ class CapCutCleanerApp:
         self.cfg = load_cfg()
         self.locked = False
         self.is_cleaning = False
-        self.show_sfx_panel = False
-        self.show_settings_panel = False
+        self.active_panel = None
+        self.is_hidden = False
+        self.animating = False
 
-        self.root.geometry(f'{self.cfg.get("w", 340)}x{self.cfg.get("h", 90)}+{self.cfg.get("x", 200)}+{self.cfg.get("y", 200)}')
+        self.root.geometry(f'{self.cfg.get("w", 420)}x{self.cfg.get("h", 90)}+{self.cfg.get("x", 200)}+{self.cfg.get("y", 200)}')
         self.root.overrideredirect(True)
         self.root.attributes("-topmost", True)
 
@@ -134,198 +150,446 @@ class CapCutCleanerApp:
         self.canvas = tk.Canvas(self.main_frame, bg=self.transparent_color, highlightthickness=0)
         self.canvas.pack(fill="both", expand=True)
 
+        self.clips_frame = tk.Frame(self.main_frame, bg="#1e1f29", bd=1, relief="solid")
         self.sfx_frame = tk.Frame(self.main_frame, bg="#1e1f29", bd=1, relief="solid")
+        self.prompts_frame = tk.Frame(self.main_frame, bg="#1e1f29", bd=1, relief="solid")
         self.settings_frame = tk.Frame(self.main_frame, bg="#1e1f29", bd=1, relief="solid")
 
+        self.setup_clips_ui()
         self.setup_sfx_ui()
+        self.setup_prompts_ui()
         self.setup_settings_ui()
 
         self.root.bind("<Configure>", self.on_resize)
-        
-        # Bắt sự kiện Kéo thả ứng dụng & Resize góc
         self.canvas.bind("<ButtonPress-1>", self.on_canvas_press)
         self.canvas.bind("<B1-Motion>", self.on_canvas_drag)
+
+        try:
+            self.root.bind_all(self.cfg.get("hotkey", "<Control-Alt-c>"), self.toggle_visibility_animated)
+        except Exception:
+            pass
+
+    def setup_clips_ui(self):
+        hdr = tk.Frame(self.clips_frame, bg="#2a2c3a")
+        hdr.pack(fill="x", side="top", padx=2, pady=2)
+        
+        lbl = tk.Label(hdr, text="🎬 CLIPS & PRESETS", bg="#2a2c3a", fg="#ffffff", font=("Segoe UI", 8, "bold"))
+        lbl.pack(side="left", padx=5, pady=4)
+
+        btn_add_cat = tk.Button(hdr, text="+ Nhóm", bg="#3b3e54", fg="white", bd=0, font=("Segoe UI", 8), command=lambda: self.add_category("clip"))
+        btn_add_cat.pack(side="right", padx=2)
+
+        btn_add = tk.Button(hdr, text="+ File", bg="#ffb703", fg="black", bd=0, font=("Segoe UI", 8, "bold"), command=self.add_clip_files)
+        btn_add.pack(side="right", padx=2)
+
+        self.clip_cat_var = tk.StringVar(value="Tất cả")
+        self.clip_cat_cb = ttk.Combobox(hdr, textvariable=self.clip_cat_var, state="readonly", width=10)
+        self.clip_cat_cb.pack(side="right", padx=5)
+        self.clip_cat_cb.bind("<<ComboboxSelected>>", lambda e: self.refresh_clip_listbox())
+
+        self.clip_listbox = tk.Listbox(self.clips_frame, bg="#14151d", fg="#e0e0e0", bd=0, 
+                                       highlightthickness=0, selectbackground="#ffb703", selectforeground="#000000",
+                                       font=("Segoe UI", 9), activestyle="none")
+        self.clip_listbox.pack(fill="both", expand=True, padx=4, pady=4)
+
+        self.refresh_clip_categories()
+        self.clip_listbox.bind("<ButtonPress-1>", lambda e: self.on_drag_start(e, "clip"))
+        self.clip_listbox.bind("<B1-Motion>", self.on_dragging)
+        self.clip_listbox.bind("<ButtonRelease-1>", self.on_drag_end)
+        self.clip_listbox.bind("<Button-3>", lambda e: self.remove_item(e, "clip"))
 
     def setup_sfx_ui(self):
         hdr = tk.Frame(self.sfx_frame, bg="#2a2c3a")
         hdr.pack(fill="x", side="top", padx=2, pady=2)
         
-        lbl_sfx = tk.Label(hdr, text="🎵 SFX FAVORITES", bg="#2a2c3a", fg="#ffffff", font=("Segoe UI", 8, "bold"))
+        lbl_sfx = tk.Label(hdr, text="🎵 SFX HIỆU ỨNG", bg="#2a2c3a", fg="#ffffff", font=("Segoe UI", 8, "bold"))
         lbl_sfx.pack(side="left", padx=5, pady=4)
 
-        btn_add = tk.Button(hdr, text="+ Thêm", bg="#3b3e54", fg="white", bd=0, font=("Segoe UI", 8), command=self.add_sfx_files)
-        btn_add.pack(side="right", padx=5)
+        btn_add_cat = tk.Button(hdr, text="+ Nhóm", bg="#3b3e54", fg="white", bd=0, font=("Segoe UI", 8), command=lambda: self.add_category("sfx"))
+        btn_add_cat.pack(side="right", padx=2)
+
+        btn_add = tk.Button(hdr, text="+ File", bg="#ffb703", fg="black", bd=0, font=("Segoe UI", 8, "bold"), command=self.add_sfx_files)
+        btn_add.pack(side="right", padx=2)
+
+        self.sfx_cat_var = tk.StringVar(value="Tất cả")
+        self.sfx_cat_cb = ttk.Combobox(hdr, textvariable=self.sfx_cat_var, state="readonly", width=10)
+        self.sfx_cat_cb.pack(side="right", padx=5)
+        self.sfx_cat_cb.bind("<<ComboboxSelected>>", lambda e: self.refresh_sfx_listbox())
 
         self.sfx_listbox = tk.Listbox(self.sfx_frame, bg="#14151d", fg="#e0e0e0", bd=0, 
-                                      highlightthickness=0, selectbackground="#3b3e54", 
+                                      highlightthickness=0, selectbackground="#ffb703", selectforeground="#000000",
                                       font=("Segoe UI", 9), activestyle="none")
         self.sfx_listbox.pack(fill="both", expand=True, padx=4, pady=4)
 
-        self.refresh_sfx_listbox()
-        self.sfx_listbox.bind("<ButtonPress-1>", self.on_sfx_drag_start)
-        self.sfx_listbox.bind("<ButtonRelease-1>", self.on_sfx_drag_end)
-        self.sfx_listbox.bind("<Button-3>", self.remove_sfx_item)
+        self.refresh_sfx_categories()
+        
+        self.sfx_listbox.bind("<ButtonPress-1>", lambda e: self.on_sfx_click_and_drag(e))
+        self.sfx_listbox.bind("<B1-Motion>", self.on_dragging)
+        self.sfx_listbox.bind("<ButtonRelease-1>", self.on_drag_end)
+        self.sfx_listbox.bind("<Button-3>", lambda e: self.remove_item(e, "sfx"))
+
+    def setup_prompts_ui(self):
+        hdr = tk.Frame(self.prompts_frame, bg="#2a2c3a")
+        hdr.pack(fill="x", side="top", padx=2, pady=2)
+        
+        lbl = tk.Label(hdr, text="💡 BỘ PROMPTS", bg="#2a2c3a", fg="#ffffff", font=("Segoe UI", 8, "bold"))
+        lbl.pack(side="left", padx=5, pady=4)
+
+        btn_add_cat = tk.Button(hdr, text="+ Nhóm", bg="#3b3e54", fg="white", bd=0, font=("Segoe UI", 8), command=lambda: self.add_category("prompt"))
+        btn_add_cat.pack(side="right", padx=2)
+
+        btn_add = tk.Button(hdr, text="+ Prompt", bg="#ffb703", fg="black", bd=0, font=("Segoe UI", 8, "bold"), command=self.add_prompt_item)
+        btn_add.pack(side="right", padx=2)
+
+        self.prompt_cat_var = tk.StringVar(value="Chung")
+        self.prompt_cat_cb = ttk.Combobox(hdr, textvariable=self.prompt_cat_var, state="readonly", width=10)
+        self.prompt_cat_cb.pack(side="right", padx=5)
+        self.prompt_cat_cb.bind("<<ComboboxSelected>>", lambda e: self.refresh_prompt_listbox())
+
+        self.prompt_listbox = tk.Listbox(self.prompts_frame, bg="#14151d", fg="#e0e0e0", bd=0, 
+                                         highlightthickness=0, selectbackground="#52c41a", selectforeground="#ffffff",
+                                         font=("Segoe UI", 9), activestyle="none")
+        self.prompt_listbox.pack(fill="both", expand=True, padx=4, pady=4)
+
+        self.refresh_prompt_categories()
+        self.prompt_listbox.bind("<Double-Button-1>", self.copy_prompt_to_clipboard)
+        self.prompt_listbox.bind("<Button-3>", lambda e: self.remove_item(e, "prompt"))
 
     def setup_settings_ui(self):
         hdr = tk.Frame(self.settings_frame, bg="#2a2c3a")
         hdr.pack(fill="x", side="top", padx=2, pady=2)
         
-        lbl_st = tk.Label(hdr, text="⚙️ CHẾ ĐỘ XÓA CACHE", bg="#2a2c3a", fg="#ffffff", font=("Segoe UI", 8, "bold"))
+        lbl_st = tk.Label(hdr, text="⚙️ CÀI ĐẶT & TỐI ƯU HỆ THỐNG", bg="#2a2c3a", fg="#ffffff", font=("Segoe UI", 8, "bold"))
         lbl_st.pack(side="left", padx=5, pady=4)
 
         content = tk.Frame(self.settings_frame, bg="#1e1f29")
         content.pack(fill="both", expand=True, padx=10, pady=5)
 
-        self.mode_var = tk.StringVar(value=self.cfg.get("clean_mode", "all"))
+        btn_ram = tk.Button(content, text="🚀 EMPTY RAM CACHE (RAMMap)", bg="#ff4d4f", fg="#ffffff", font=("Segoe UI", 8, "bold"), bd=0, command=self.empty_ram_cache)
+        btn_ram.pack(fill="x", pady=(0, 6))
+
+        lbl_cust = tk.Label(content, text="Thư mục xóa tùy chỉnh thêm:", bg="#1e1f29", fg="#ffb703", font=("Segoe UI", 8, "bold"))
+        lbl_cust.pack(anchor="w")
+
+        f_tools = tk.Frame(content, bg="#1e1f29")
+        f_tools.pack(fill="x", pady=2)
+
+        btn_add_folder = tk.Button(f_tools, text="+ Thêm thư mục", bg="#3b3e54", fg="white", bd=0, font=("Segoe UI", 8), command=self.add_custom_folder)
+        btn_add_folder.pack(side="left")
+
+        self.custom_folder_listbox = tk.Listbox(content, bg="#14151d", fg="#e0e0e0", bd=0, height=3, font=("Segoe UI", 8))
+        self.custom_folder_listbox.pack(fill="both", expand=True, pady=2)
+        self.custom_folder_listbox.bind("<Button-3>", self.remove_custom_folder)
+        self.refresh_custom_folders()
+
+    def empty_ram_cache(self):
+        dlg = CustomConfirm(self.root, "Xóa Standby List & Working Sets của RAM?")
+        self.root.wait_window(dlg)
+        if dlg.result:
+            try:
+                cmd = 'powershell -command "[System.GC]::Collect(); [System.GC]::WaitForPendingFinalizers()"'
+                subprocess.run(cmd, shell=True)
+                messagebox.showinfo("Thành công", "⚡ Đã tối ưu và giải phóng RAM Cache!")
+            except Exception as e:
+                messagebox.showerror("Lỗi", f"Không thể giải phóng RAM: {str(e)}")
+
+    def add_custom_folder(self):
+        folder = filedialog.askdirectory(title="Chọn thư mục muốn dọn dẹp")
+        if folder:
+            f_norm = os.path.normpath(folder)
+            cfgs = self.cfg.get("custom_folders", [])
+            if f_norm not in cfgs:
+                cfgs.append(f_norm)
+                self.cfg["custom_folders"] = cfgs
+                save_cfg(self.cfg)
+                self.refresh_custom_folders()
+
+    def refresh_custom_folders(self):
+        self.custom_folder_listbox.delete(0, tk.END)
+        for f in self.cfg.get("custom_folders", []):
+            self.custom_folder_listbox.insert(tk.END, f" 📁 {f}")
+
+    def remove_custom_folder(self, event):
+        idx = self.custom_folder_listbox.nearest(event.y)
+        cfgs = self.cfg.get("custom_folders", [])
+        if 0 <= idx < len(cfgs):
+            dlg = CustomConfirm(self.root, f"Xóa thư mục '{cfgs[idx]}' khỏi danh sách?")
+            self.root.wait_window(dlg)
+            if dlg.result:
+                del cfgs[idx]
+                self.cfg["custom_folders"] = cfgs
+                save_cfg(self.cfg)
+                self.refresh_custom_folders()
+
+    def add_category(self, cat_type):
+        def save_cat():
+            name = entry.get().strip()
+            if name:
+                key = f"{cat_type}_data"
+                if name not in self.cfg[key]:
+                    self.cfg[key][name] = []
+                    save_cfg(self.cfg)
+                    if cat_type == "clip": self.refresh_clip_categories()
+                    elif cat_type == "sfx": self.refresh_sfx_categories()
+                    elif cat_type == "prompt": self.refresh_prompt_categories()
+            top.destroy()
+
+        top = tk.Toplevel(self.root)
+        top.overrideredirect(True)
+        top.attributes("-topmost", True)
+        top.configure(bg="#1e1f29")
+        pw, ph = self.root.winfo_width(), self.root.winfo_height()
+        px, py = self.root.winfo_x(), self.root.winfo_y()
+        top.geometry(f"220x90+{px + (pw-220)//2}+{py + (ph-90)//2}")
+
+        tk.Label(top, text="Tên nhóm mới:", bg="#1e1f29", fg="#ffffff", font=("Segoe UI", 8, "bold")).pack(pady=4)
+        entry = tk.Entry(top, bg="#14151d", fg="#ffffff", bd=1)
+        entry.pack(padx=10, pady=2)
+        entry.focus_set()
+
+        tk.Button(top, text="Thêm", bg="#52c41a", fg="white", bd=0, command=save_cat).pack(pady=4)
+
+    def refresh_clip_categories(self):
+        cats = list(self.cfg.get("clip_data", {}).keys())
+        if "Tất cả" not in cats: cats.insert(0, "Tất cả")
+        self.clip_cat_cb['values'] = cats
+        self.refresh_clip_listbox()
+
+    def refresh_sfx_categories(self):
+        cats = list(self.cfg.get("sfx_data", {}).keys())
+        if "Tất cả" not in cats: cats.insert(0, "Tất cả")
+        self.sfx_cat_cb['values'] = cats
+        self.refresh_sfx_listbox()
+
+    def refresh_prompt_categories(self):
+        cats = list(self.cfg.get("prompt_data", {}).keys())
+        self.prompt_cat_cb['values'] = cats
+        if cats and self.prompt_cat_var.get() not in cats:
+            self.prompt_cat_var.set(cats[0])
+        self.refresh_prompt_listbox()
+
+    def refresh_clip_listbox(self):
+        self.clip_listbox.delete(0, tk.END)
+        cat = self.clip_cat_var.get()
+        clip_data = self.cfg.get("clip_data", {})
         
-        rb_all = tk.Radiobutton(content, text="Xóa TẤT CẢ Thư mục Cache", variable=self.mode_var, value="all",
-                                bg="#1e1f29", fg="#ffffff", selectcolor="#2b2d42", activebackground="#1e1f29",
-                                activeforeground="#ffffff", font=("Segoe UI", 9, "bold"), command=self.on_mode_change)
-        rb_all.pack(anchor="w", pady=(2, 5))
+        paths = []
+        if cat == "Tất cả":
+            for p_list in clip_data.values(): paths.extend(p_list)
+        else:
+            paths = clip_data.get(cat, [])
 
-        rb_custom = tk.Radiobutton(content, text="Phân loại theo nhu cầu:", variable=self.mode_var, value="custom",
-                                   bg="#1e1f29", fg="#ffffff", selectcolor="#2b2d42", activebackground="#1e1f29",
-                                   activeforeground="#ffffff", font=("Segoe UI", 9, "bold"), command=self.on_mode_change)
-        rb_custom.pack(anchor="w", pady=(0, 5))
-
-        self.check_vars = {}
-        selected_types = self.cfg.get("selected_types", ["preview", "proxy", "gpu", "temp"])
-
-        self.chk_frame = tk.Frame(content, bg="#14151d", bd=1, relief="solid")
-        self.chk_frame.pack(fill="both", expand=True, padx=10, pady=2)
-
-        for key, info in CACHE_CATEGORIES.items():
-            var = tk.BooleanVar(value=(key in selected_types))
-            self.check_vars[key] = var
-            chk = tk.Checkbutton(self.chk_frame, text=info["name"], variable=var,
-                                 bg="#14151d", fg="#e0e0e0", selectcolor="#2b2d42",
-                                 activebackground="#14151d", activeforeground="#ffffff",
-                                 font=("Segoe UI", 8), command=self.save_settings)
-            chk.pack(anchor="w", padx=8, pady=2)
-
-        self.toggle_chk_state()
-
-    def toggle_chk_state(self):
-        is_custom = self.mode_var.get() == "custom"
-        for child in self.chk_frame.winfo_children():
-            if is_custom:
-                child.configure(state="normal")
-            else:
-                child.configure(state="disabled")
-
-    def on_mode_change(self):
-        self.toggle_chk_state()
-        self.save_settings()
-
-    def save_settings(self):
-        self.cfg["clean_mode"] = self.mode_var.get()
-        self.cfg["selected_types"] = [k for k, v in self.check_vars.items() if v.get()]
-        save_cfg(self.cfg)
+        self.current_clips = list(set(paths))
+        for p in self.current_clips:
+            self.clip_listbox.insert(tk.END, f" 🎬 {os.path.basename(p)}")
 
     def refresh_sfx_listbox(self):
         self.sfx_listbox.delete(0, tk.END)
-        for path in self.cfg.get("sfx_list", []):
-            file_name = os.path.basename(path)
-            self.sfx_listbox.insert(tk.END, f" 🔊 {file_name}")
+        cat = self.sfx_cat_var.get()
+        sfx_data = self.cfg.get("sfx_data", {})
+        
+        paths = []
+        if cat == "Tất cả":
+            for p_list in sfx_data.values(): paths.extend(p_list)
+        else:
+            paths = sfx_data.get(cat, [])
+
+        self.current_sfx = list(set(paths))
+        for p in self.current_sfx:
+            self.sfx_listbox.insert(tk.END, f" 🔊 {os.path.basename(p)}")
+
+    def refresh_prompt_listbox(self):
+        self.prompt_listbox.delete(0, tk.END)
+        cat = self.prompt_cat_var.get()
+        prompts = self.cfg.get("prompt_data", {}).get(cat, [])
+        for p in prompts:
+            self.prompt_listbox.insert(tk.END, f" 💡 {p.get('title', 'Untitled')}")
+
+    def add_clip_files(self):
+        files = filedialog.askopenfilenames(title="Chọn Clips/Media", filetypes=[("Media", "*.mp4 *.mov *.avi *.png *.jpg")])
+        if files:
+            cat = self.clip_cat_var.get()
+            if cat == "Tất cả": cat = "Chung"
+            data = self.cfg.get("clip_data", {})
+            if cat not in data: data[cat] = []
+            for f in files:
+                p = os.path.normpath(f)
+                if p not in data[cat]: data[cat].append(p)
+            self.cfg["clip_data"] = data
+            save_cfg(self.cfg)
+            self.refresh_clip_listbox()
 
     def add_sfx_files(self):
-        files = filedialog.askopenfilenames(
-            title="Chọn file âm thanh SFX",
-            filetypes=[("Audio Files", "*.mp3 *.wav *.aac *.m4a *.ogg")]
-        )
+        files = filedialog.askopenfilenames(title="Chọn SFX", filetypes=[("Audio", "*.mp3 *.wav *.ogg *.m4a")])
         if files:
-            current_list = self.cfg.get("sfx_list", [])
+            cat = self.sfx_cat_var.get()
+            if cat == "Tất cả": cat = "Chung"
+            data = self.cfg.get("sfx_data", {})
+            if cat not in data: data[cat] = []
             for f in files:
-                norm_p = os.path.normpath(f)
-                if norm_p not in current_list:
-                    current_list.append(norm_p)
-            self.cfg["sfx_list"] = current_list
+                p = os.path.normpath(f)
+                if p not in data[cat]: data[cat].append(p)
+            self.cfg["sfx_data"] = data
             save_cfg(self.cfg)
             self.refresh_sfx_listbox()
 
-    def remove_sfx_item(self, event):
+    def add_prompt_item(self):
+        def save_p():
+            t = e_title.get().strip()
+            c = txt_content.get("1.0", tk.END).strip()
+            if t and c:
+                cat = self.prompt_cat_var.get()
+                p_data = self.cfg.get("prompt_data", {})
+                if cat not in p_data: p_data[cat] = []
+                p_data[cat].append({"title": t, "content": c})
+                self.cfg["prompt_data"] = p_data
+                save_cfg(self.cfg)
+                self.refresh_prompt_listbox()
+                top.destroy()
+
+        top = tk.Toplevel(self.root)
+        top.overrideredirect(True)
+        top.attributes("-topmost", True)
+        top.configure(bg="#1e1f29")
+        pw, ph = self.root.winfo_width(), self.root.winfo_height()
+        px, py = self.root.winfo_x(), self.root.winfo_y()
+        top.geometry(f"300x200+{px + (pw-300)//2}+{py + (ph-200)//2}")
+
+        tk.Label(top, text="Tiêu đề Prompt (Ngắn):", bg="#1e1f29", fg="#ffffff", font=("Segoe UI", 8, "bold")).pack(anchor="w", padx=10, pady=(6,0))
+        e_title = tk.Entry(top, bg="#14151d", fg="#ffffff", bd=1)
+        e_title.pack(fill="x", padx=10, pady=2)
+
+        tk.Label(top, text="Nội dung Prompt đầy đủ:", bg="#1e1f29", fg="#ffffff", font=("Segoe UI", 8, "bold")).pack(anchor="w", padx=10, pady=(4,0))
+        txt_content = tk.Text(top, bg="#14151d", fg="#ffffff", bd=1, height=4)
+        txt_content.pack(fill="both", expand=True, padx=10, pady=2)
+
+        tk.Button(top, text="Lưu Prompt", bg="#52c41a", fg="white", bd=0, font=("Segoe UI", 8, "bold"), command=save_p).pack(pady=6)
+
+    def copy_prompt_to_clipboard(self, event):
+        idx = self.prompt_listbox.nearest(event.y)
+        cat = self.prompt_cat_var.get()
+        prompts = self.cfg.get("prompt_data", {}).get(cat, [])
+        if 0 <= idx < len(prompts):
+            content = prompts[idx].get("content", "")
+            self.root.clipboard_clear()
+            self.root.clipboard_append(content)
+            messagebox.showinfo("Thành công", f"⚡ Đã Copy Prompt '{prompts[idx]['title']}' vào bộ nhớ tạm!")
+
+    def on_sfx_click_and_drag(self, event):
         idx = self.sfx_listbox.nearest(event.y)
-        if idx >= 0 and idx < len(self.cfg.get("sfx_list", [])):
-            file_path = self.cfg["sfx_list"][idx]
-            file_name = os.path.basename(file_path)
-            dlg = CustomConfirm(self.root, f"Xóa '{file_name[:15]}...'?")
+        if 0 <= idx < len(getattr(self, 'current_sfx', [])):
+            file_path = self.current_sfx[idx]
+            self.drag_file_path = file_path
+            set_clipboard_files([file_path])
+            
+            if HAS_PYGAME and os.path.exists(file_path):
+                try:
+                    pygame.mixer.music.load(file_path)
+                    pygame.mixer.music.play()
+                except Exception:
+                    pass
+
+    def on_drag_start(self, event, target_type):
+        lbox = self.clip_listbox if target_type == "clip" else self.sfx_listbox
+        arr = getattr(self, 'current_clips' if target_type == "clip" else 'current_sfx', [])
+        idx = lbox.nearest(event.y)
+        if 0 <= idx < len(arr):
+            self.drag_file_path = arr[idx]
+            set_clipboard_files([self.drag_file_path])
+
+    def on_dragging(self, event):
+        if hasattr(self, 'drag_file_path') and self.drag_file_path:
+            self.root.config(cursor="hand2")
+
+    def on_drag_end(self, event):
+        self.root.config(cursor="")
+        self.drag_file_path = None
+
+    def remove_item(self, event, target_type):
+        if target_type == "clip":
+            lbox, cat = self.clip_listbox, self.clip_cat_var.get()
+            key, arr = "clip_data", getattr(self, 'current_clips', [])
+        elif target_type == "sfx":
+            lbox, cat = self.sfx_listbox, self.sfx_cat_var.get()
+            key, arr = "sfx_data", getattr(self, 'current_sfx', [])
+        else:
+            lbox, cat = self.prompt_listbox, self.prompt_cat_var.get()
+            key, arr = "prompt_data", self.cfg.get("prompt_data", {}).get(cat, [])
+
+        idx = lbox.nearest(event.y)
+        if 0 <= idx < len(arr):
+            dlg = CustomConfirm(self.root, "Xóa mục này khỏi danh sách?")
             self.root.wait_window(dlg)
             if dlg.result:
-                del self.cfg["sfx_list"][idx]
+                if target_type == "prompt":
+                    del self.cfg[key][cat][idx]
+                else:
+                    target_path = arr[idx]
+                    if cat == "Tất cả":
+                        for c in self.cfg[key]:
+                            if target_path in self.cfg[key][c]: self.cfg[key][c].remove(target_path)
+                    else:
+                        if target_path in self.cfg[key][cat]: self.cfg[key][cat].remove(target_path)
+
                 save_cfg(self.cfg)
-                self.refresh_sfx_listbox()
+                if target_type == "clip": self.refresh_clip_listbox()
+                elif target_type == "sfx": self.refresh_sfx_listbox()
+                else: self.refresh_prompt_listbox()
 
-    def on_sfx_drag_start(self, event):
-        idx = self.sfx_listbox.nearest(event.y)
-        if idx >= 0 and idx < len(self.cfg.get("sfx_list", [])):
-            self.drag_file_path = self.cfg["sfx_list"][idx]
+    def toggle_visibility_animated(self, event=None):
+        if self.animating: return
+        self.animating = True
+        
+        cur_x = self.root.winfo_x()
+        cur_y = self.root.winfo_y()
 
-    def on_sfx_drag_end(self, event):
-        if hasattr(self, 'drag_file_path') and self.drag_file_path:
-            x, y = self.root.winfo_pointerxy()
-            rx = self.root.winfo_rootx()
-            ry = self.root.winfo_rooty()
-            rw = self.root.winfo_width()
-            rh = self.root.winfo_height()
-            
-            if not (rx <= x <= rx + rw and ry <= y <= ry + rh):
-                self.copy_file_to_clipboard(self.drag_file_path)
-            self.drag_file_path = None
+        if not self.is_hidden:
+            for i in range(0, 10):
+                self.root.geometry(f"+{cur_x}+{cur_y + i*5}")
+                self.root.attributes("-alpha", 1.0 - (i * 0.09))
+                self.root.update()
+                self.root.after(10)
+            self.root.withdraw()
+            self.is_hidden = True
+        else:
+            self.root.deiconify()
+            for i in range(10, -1, -1):
+                self.root.geometry(f"+{cur_x}+{cur_y + i*5}")
+                self.root.attributes("-alpha", 1.0 - (i * 0.09))
+                self.root.update()
+                self.root.after(10)
+            self.is_hidden = False
 
-    def copy_file_to_clipboard(self, file_path):
-        try:
-            command = f'powershell -command "Set-Clipboard -Path \'{file_path}\'"'
-            os.system(command)
-        except Exception:
-            pass
+        self.animating = False
 
     def draw_ui(self):
         self.canvas.delete("all")
-        w = self.root.winfo_width()
-        h = self.root.winfo_height()
-
-        if w < 10 or h < 10:
-            return
+        w, h = self.root.winfo_width(), self.root.winfo_height()
+        if w < 10 or h < 10: return
 
         self.draw_rounded_rect(3, 3, w - 3, h - 3, radius=16, fill="#1e1f29", outline="#3b3e54", width=1.5)
         self.draw_rounded_rect(5, 5, w - 5, max(10, 38), radius=12, fill="#2a2c3a", outline="", width=0)
 
-        # NÚT ĐỎ / XANH - KHÓA VÀ MỞ
         dot_color = "#ff4d4f" if self.locked else "#52c41a"
-        dot_glow = "#820014" if self.locked else "#135200"
-        
-        self.lock_glow = self.canvas.create_oval(12, 12, 26, 26, fill=dot_glow, outline="")
         self.lock_dot = self.canvas.create_oval(14, 14, 24, 24, fill=dot_color, outline="#ffffff", width=1)
-        
         self.canvas.tag_bind(self.lock_dot, "<Button-1>", self.toggle_lock)
-        self.canvas.tag_bind(self.lock_glow, "<Button-1>", self.toggle_lock)
 
-        # Nút SFX 🎵
-        sfx_bg = "#ffb703" if self.show_sfx_panel else "#2b2d42"
-        sfx_fg = "#000000" if self.show_sfx_panel else "#ffffff"
-        self.btn_sfx_rect = self.draw_rounded_rect(32, 10, 85, 34, radius=6, fill=sfx_bg, outline="#4a4d6b")
-        self.btn_sfx_txt = self.canvas.create_text(58, 22, text="🎵 SFX", fill=sfx_fg, font=("Segoe UI", 8, "bold"))
-        for el in [self.btn_sfx_rect, self.btn_sfx_txt]:
-            self.canvas.tag_bind(el, "<Button-1>", self.toggle_sfx_panel)
+        tabs = [("clips", "🎬 CLIPS", 32, 92), ("sfx", "🎵 SFX", 97, 152), ("prompts", "💡 PROMPT", 157, 232), ("settings", "⚙️ SETTINGS", 237, 312)]
+        for name, text, x1, x2 in tabs:
+            bg = "#ffb703" if self.active_panel == name else "#2b2d42"
+            fg = "#000000" if self.active_panel == name else "#ffffff"
+            r = self.draw_rounded_rect(x1, 10, x2, 34, radius=6, fill=bg, outline="#4a4d6b")
+            t = self.canvas.create_text((x1 + x2)//2, 22, text=text, fill=fg, font=("Segoe UI", 8, "bold"))
+            for el in [r, t]: self.canvas.tag_bind(el, "<Button-1>", lambda e, n=name: self.toggle_panel(n))
 
-        # Nút Cài đặt ⚙️
-        st_bg = "#ffb703" if self.show_settings_panel else "#2b2d42"
-        st_fg = "#000000" if self.show_settings_panel else "#ffffff"
-        self.btn_st_rect = self.draw_rounded_rect(90, 10, 130, 34, radius=6, fill=st_bg, outline="#4a4d6b")
-        self.btn_st_txt = self.canvas.create_text(110, 22, text="⚙️", fill=st_fg, font=("Segoe UI", 9, "bold"))
-        for el in [self.btn_st_rect, self.btn_st_txt]:
-            self.canvas.tag_bind(el, "<Button-1>", self.toggle_settings_panel)
+        btn_close_r = self.draw_rounded_rect(w - 30, 10, w - 10, 34, radius=6, fill="#2b2d42", outline="#4a4d6b")
+        btn_close_t = self.canvas.create_text(w - 20, 22, text="✕", fill="#ffffff", font=("Segoe UI", 8, "bold"))
+        for el in [btn_close_r, btn_close_t]: self.canvas.tag_bind(el, "<Button-1>", self.quit_app)
 
-        # Nút Đóng ✕
-        self.btn_close_rect = self.draw_rounded_rect(w - 30, 10, w - 10, 34, radius=6, fill="#2b2d42", outline="#4a4d6b")
-        self.btn_close_txt = self.canvas.create_text(w - 20, 22, text="✕", fill="#ffffff", font=("Segoe UI", 8, "bold"))
-        for el in [self.btn_close_rect, self.btn_close_txt]:
-            self.canvas.tag_bind(el, "<Button-1>", self.quit_app)
-
-        btn_text_str = "⏳ WORKING..." if self.is_cleaning else "🧹 CLEAR CACHE"
+        btn_text_str = "⏳ WORKING..." if self.is_cleaning else "🧹 CLEAR ALL CACHE"
         btn_fill = "#212333" if (self.locked or self.is_cleaning) else "#2b2d42"
         
-        btn_h_bottom = (h - 220) if (self.show_sfx_panel or self.show_settings_panel) else (h - 10)
+        btn_h_bottom = (h - 220) if self.active_panel else (h - 10)
         self.btn_clear_rect = self.draw_rounded_rect(10, 42, w - 10, max(75, btn_h_bottom), radius=10, fill=btn_fill, outline="#4a4d6b")
         self.btn_clear_txt = self.canvas.create_text(w // 2, 42 + (max(75, btn_h_bottom) - 42) // 2, text=btn_text_str, fill="#ffffff", font=("Segoe UI", 9, "bold"))
 
@@ -333,77 +597,53 @@ class CapCutCleanerApp:
             for el in [self.btn_clear_rect, self.btn_clear_txt]:
                 self.canvas.tag_bind(el, "<Button-1>", self.on_clear_click)
 
-        # VÙNG KÉO GIÃN RESIZE Ở GÓC PHẢI DƯỚI (GRIP)
         if not self.locked:
-            self.grip = self.canvas.create_polygon(
-                w - 18, h - 4, w - 4, h - 18, w - 4, h - 4,
-                fill="#ffb703", outline=""
-            )
+            self.grip = self.canvas.create_polygon(w - 18, h - 4, w - 4, h - 18, w - 4, h - 4, fill="#ffb703", outline="")
+
+    def toggle_panel(self, panel_name):
+        self.clips_frame.place_forget()
+        self.sfx_frame.place_forget()
+        self.prompts_frame.place_forget()
+        self.settings_frame.place_forget()
+
+        if self.active_panel == panel_name:
+            self.active_panel = None
+            self.root.geometry(f'{self.root.winfo_width()}x90')
+        else:
+            self.active_panel = panel_name
+            self.root.geometry(f'{self.root.winfo_width()}x320')
+            w = self.root.winfo_width() - 20
+            h = 220
+            if panel_name == "clips": self.clips_frame.place(x=10, y=85, width=w, height=h)
+            elif panel_name == "sfx": self.sfx_frame.place(x=10, y=85, width=w, height=h)
+            elif panel_name == "prompts": self.prompts_frame.place(x=10, y=85, width=w, height=h)
+            elif panel_name == "settings": self.settings_frame.place(x=10, y=85, width=w, height=h)
+
+        self.draw_ui()
 
     def on_canvas_press(self, e):
-        if self.locked:
-            return
-            
-        w = self.root.winfo_width()
-        h = self.root.winfo_height()
-        
-        # Kiểm tra xem click có trúng khu vực Grip góc dưới bên phải (20x20px) không
+        if self.locked: return
+        w, h = self.root.winfo_width(), self.root.winfo_height()
         if (w - 22 <= e.x <= w) and (h - 22 <= e.y <= h):
             self.is_resizing = True
-            self.start_rw = w
-            self.start_rh = h
-            self.start_rx = e.x_root
-            self.start_ry = e.y_root
+            self.start_rw, self.start_rh = w, h
+            self.start_rx, self.start_ry = e.x_root, e.y_root
         else:
             self.is_resizing = False
-            self.mx = e.x_root
-            self.my = e.y_root
+            self.mx, self.my = e.x_root, e.y_root
 
     def on_canvas_drag(self, e):
-        if self.locked:
-            return
-            
+        if self.locked: return
         if getattr(self, 'is_resizing', False):
-            # Tính toán kích thước mới khi rê chuột
-            new_w = max(260, self.start_rw + (e.x_root - self.start_rx))
-            min_h = 320 if (self.show_sfx_panel or self.show_settings_panel) else 90
+            new_w = max(400, self.start_rw + (e.x_root - self.start_rx))
+            min_h = 320 if self.active_panel else 90
             new_h = max(min_h, self.start_rh + (e.y_root - self.start_ry))
             self.root.geometry(f"{new_w}x{new_h}")
         else:
-            # Di chuyển cửa sổ
             dx = e.x_root - self.mx
             dy = e.y_root - self.my
-            self.mx = e.x_root
-            self.my = e.y_root
+            self.mx, self.my = e.x_root, e.y_root
             self.root.geometry(f"+{self.root.winfo_x() + dx}+{self.root.winfo_y() + dy}")
-
-    def toggle_sfx_panel(self, e=None):
-        if self.show_settings_panel:
-            self.show_settings_panel = False
-            self.settings_frame.place_forget()
-
-        self.show_sfx_panel = not self.show_sfx_panel
-        if self.show_sfx_panel:
-            self.root.geometry(f'{self.root.winfo_width()}x320')
-            self.sfx_frame.place(x=10, y=85, width=self.root.winfo_width() - 20, height=220)
-        else:
-            self.sfx_frame.place_forget()
-            self.root.geometry(f'{self.root.winfo_width()}x90')
-        self.draw_ui()
-
-    def toggle_settings_panel(self, e=None):
-        if self.show_sfx_panel:
-            self.show_sfx_panel = False
-            self.sfx_frame.place_forget()
-
-        self.show_settings_panel = not self.show_settings_panel
-        if self.show_settings_panel:
-            self.root.geometry(f'{self.root.winfo_width()}x320')
-            self.settings_frame.place(x=10, y=85, width=self.root.winfo_width() - 20, height=220)
-        else:
-            self.settings_frame.place_forget()
-            self.root.geometry(f'{self.root.winfo_width()}x90')
-        self.draw_ui()
 
     def draw_rounded_rect(self, x1, y1, x2, y2, radius=20, **kwargs):
         points = [
@@ -423,10 +663,7 @@ class CapCutCleanerApp:
         self.draw_ui()
 
     def on_clear_click(self, e=None):
-        mode = self.cfg.get("clean_mode", "all")
-        msg = "Xóa TẤT CẢ thư mục Cache CapCut?" if mode == "all" else "Xóa các phân loại Cache đã chọn?"
-        
-        dlg = CustomConfirm(self.root, msg)
+        dlg = CustomConfirm(self.root, "Xóa toàn bộ Cache CapCut & các thư mục đã thêm?")
         self.root.wait_window(dlg)
         if dlg.result:
             self.is_cleaning = True
@@ -434,38 +671,21 @@ class CapCutCleanerApp:
             threading.Thread(target=self.run_clear_logic, daemon=True).start()
 
     def run_clear_logic(self):
-        mode = self.cfg.get("clean_mode", "all")
         target_paths = []
-
-        if mode == "all":
-            for cat in CACHE_CATEGORIES.values():
-                target_paths.extend(cat["paths"])
-        else:
-            selected_types = self.cfg.get("selected_types", [])
-            for key in selected_types:
-                if key in CACHE_CATEGORIES:
-                    target_paths.extend(CACHE_CATEGORIES[key]["paths"])
+        for cat in CACHE_CATEGORIES.values(): target_paths.extend(cat["paths"])
+        target_paths.extend(self.cfg.get("custom_folders", []))
 
         success_count = 0
-        errors = 0
-
         for folder_path in target_paths:
             if os.path.exists(folder_path):
                 try:
                     shutil.rmtree(folder_path, onerror=remove_readonly)
                     success_count += 1
                 except Exception:
-                    errors += 1
+                    pass
 
         def done():
-            if success_count > 0:
-                msg = f"✨ Đã làm sạch thành công {success_count} thư mục cache!"
-                if errors > 0:
-                    msg += f"\n(Có {errors} thư mục bị bận do CapCut đang mở)"
-            else:
-                msg = "✨ Không tìm thấy file rác hoặc các thư mục đã trống sẵn!"
-            
-            messagebox.showinfo("Kết quả", msg)
+            messagebox.showinfo("Hoàn tất", f"✨ Đã làm sạch {success_count} thư mục Cache!")
             self.is_cleaning = False
             self.draw_ui()
 
@@ -474,10 +694,10 @@ class CapCutCleanerApp:
     def on_resize(self, e):
         w = self.root.winfo_width() - 20
         h = self.root.winfo_height() - 95
-        if self.show_sfx_panel:
-            self.sfx_frame.place(x=10, y=85, width=w, height=h)
-        elif self.show_settings_panel:
-            self.settings_frame.place(x=10, y=85, width=w, height=h)
+        if self.active_panel == "clips": self.clips_frame.place(x=10, y=85, width=w, height=h)
+        elif self.active_panel == "sfx": self.sfx_frame.place(x=10, y=85, width=w, height=h)
+        elif self.active_panel == "prompts": self.prompts_frame.place(x=10, y=85, width=w, height=h)
+        elif self.active_panel == "settings": self.settings_frame.place(x=10, y=85, width=w, height=h)
         self.draw_ui()
 
     def quit_app(self, e=None):
